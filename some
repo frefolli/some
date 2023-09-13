@@ -1,0 +1,237 @@
+#!/usr/bin/ruby
+
+require "yaml"
+
+def indent(string)
+  return "\t" + string.gsub("\n", "\n\t")
+end
+
+class Job
+  def process(config)
+  end
+end
+
+class JobQueue
+  def initialize(queue)
+    @queue = queue
+  end
+
+  def process(config)
+    @queue.each do |j|
+      config = j.process(config)
+    end
+    config
+  end
+end
+
+class LoadConfigJob < Job
+  def process(config_path)
+    if config_path.nil?
+      config_path = "Somefile"
+    end
+    YAML.load_file(config_path)
+  end
+end
+
+class ProcessOptionsJob < Job
+  def process(config)
+    @config = config
+    initialize_options
+    validate_by_enum "sep", [".", "-", ":"], "."
+    @config
+  end
+
+  private
+    def initialize_options
+      @config["options"] = {} if @config["options"].nil?
+    end
+
+    def validate_by_enum(key, choices, default)
+      if @config["options"][key].nil?
+        @config["options"][key] = default
+      else
+        if not choices.include? @config["options"][key]
+          raise "Invalid options:key value #{@config["options"][key]}, expeact one of #{choices}"
+        end
+      end
+    end
+end
+
+class AssignNamesJob < Job
+  def process(config)
+    @options = config["options"]
+    config["units"] = assign_names config["units"]
+    config
+  end
+
+  private
+    def assign_names(unit, namespace = nil)
+      unit.keys().each do |k|
+        if not /.*%/.match? k
+          if unit[k].is_a? Hash
+            unit[k]["name%"] = scoped_name(namespace, k)
+            unit[k] = assign_names(unit[k], unit[k]["name%"])
+          end
+        end
+      end
+      unit
+    end
+
+    def scoped_name(namespace, name)
+      if namespace.nil?
+        return name
+      else
+        return [namespace, name].join @options["sep"]
+      end
+    end
+end
+
+class AssignPathsJob < Job
+  def process(config)
+    @options = config["options"]
+    config["units"] = assign_paths config["units"]
+    config
+  end
+
+  private
+    def assign_paths(unit, parent_path = nil)
+      unit.keys().each do |k|
+        if unit[k].is_a? Hash
+          if unit[k]["path%"].nil?
+            unit[k]["path%"] = parent_path unless parent_path.nil?
+          else
+            unit[k]["path%"] = scoped_path(parent_path, unit[k]["path%"])
+          end
+          unit[k] = assign_paths(unit[k], unit[k]["path%"])
+        elsif unit[k].is_a? String
+          if not /^.*%$/.match? k
+            unit[k] = {
+              "cmnd%" => unit[k]
+            }
+            unit[k]["path%"] = parent_path unless parent_path.nil?
+          end
+        elsif unit[k].nil?
+          unit[k] = {"path%" => parent_path}
+        end
+      end
+      unit
+    end
+
+    def scoped_path(parent_path, path)
+      if parent_path.nil?
+        return path
+      else
+        return [parent_path, path].join "/"
+      end
+    end
+end
+
+class ProcessLinksJob < Job
+  def process(config)
+    @config = config
+    process_links config["units"]
+    @config
+  end
+
+  private
+    def process_links(unit)
+      unit.keys().each do |k|
+        if not /.*%/.match? k
+          if unit[k].is_a? String
+            if is_link unit[k]
+              unit[k] = resolve(extract_link(unit[k]))
+            end
+          elsif unit[k].is_a? Hash
+            unit[k] = process_links unit[k]
+          end
+        end
+      end
+      unit
+    end
+
+    def is_link(string)
+      /^\$\((.*)\)$/.match? string
+    end
+
+    def extract_link(string)
+      (/^\$\((.*)\)$/.match string)[1].split(".")
+    end
+
+    def resolve(ids)
+      if ids.empty?
+        raise "unable to resolve empty path"
+      end
+      context = @config["units"]
+      ids.each do |id|
+        if context[id].nil? then
+          raise "context #{context.to_yaml} has no child #{id}"
+        end
+        context = context[id]
+      end
+      context.clone
+    end
+end
+
+class BuildFunctionsJob < Job
+  def process(config)
+    @config = config
+    build_functions config["units"]
+    @config
+  end
+
+  private
+    def build_functions(unit)
+      unit.keys().each do |k|
+        if not /.*%/.match? k
+          if unit[k].is_a? Hash
+            if not unit[k]["name%"].nil?
+              name = unit[k]["name%"]
+              puts "function #{name} {"
+              if not unit[k]["path%"].nil?
+                path = unit[k]["path%"]
+                puts "  cd #{path}"
+              end
+              if not unit[k]["cmnd%"].nil?
+                puts indent(unit[k]["cmnd%"])
+              end
+              puts "}"
+            end
+            unit[k] = build_functions unit[k]
+          end
+        end
+      end
+      unit
+    end
+end
+
+class CLI
+  def initialize
+    @args = ARGV
+  end
+
+  def dry_run?
+    ((@args.include? "--dry-run") or
+     (@args.include? "-d"))
+  end
+
+  def file
+    i = ((@args.find_index "--file") or
+         (@args.find_index "-f"))
+    @args[i+1] unless i.nil?
+    "Somefile"
+  end
+end
+
+cli = CLI.new
+
+queue = [
+  LoadConfigJob.new,
+  ProcessOptionsJob.new,
+  ProcessLinksJob.new,
+  AssignPathsJob.new,
+  AssignNamesJob.new,
+]
+queue.append(BuildFunctionsJob.new) unless cli.dry_run?
+
+config = JobQueue.new(queue).process cli.file
+puts config.to_yaml if cli.dry_run?
