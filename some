@@ -209,6 +209,11 @@ class CLI
     @args = ARGV
   end
 
+  def help?
+    ((@args.include? "--help") or
+     (@args.include? "-h"))
+  end
+
   def dry_run?
     ((@args.include? "--dry-run") or
      (@args.include? "-d"))
@@ -217,12 +222,22 @@ class CLI
   def file
     i = ((@args.find_index "--file") or
          (@args.find_index "-f"))
-    @args[i+1] unless i.nil?
-    "Somefile"
+    result = "Somefile" 
+    result = @args[i+1] unless i.nil?
+    result
   end
 end
 
 cli = CLI.new
+
+if cli.help?
+  puts "some [-h -d -f <file>]"
+  puts "-------------------------"
+  puts "-h/--help:    Help Screen"
+  puts "-d/--dry-run: Dry Run"
+  puts "-f/--file:    Input File"
+  return
+end
 
 queue = [
   LoadConfigJob.new,
@@ -233,5 +248,5 @@ queue = [
 ]
 queue.append(BuildFunctionsJob.new) unless cli.dry_run?
 
-config = JobQueue.new(queue).process cli.file
+config = JobQueue.new(queue).process(cli.file)
 puts config.to_yaml if cli.dry_run?
